@@ -1,84 +1,120 @@
-#[macro_use]
 extern crate log;
 
 use clap::{crate_version, App, Arg, ArgMatches};
+use std::time::Duration;
 use unmoved_mover::daemon;
 
+fn get_arg_key(matches: &ArgMatches, name: &str) -> String {
+    let key: String = matches
+        .value_of(name)
+        .expect(&*format!("Invalid {name}", name = name))
+        .to_string();
 
-fn get_arg_keycode(matches: &ArgMatches, name: &str) -> u32 {
-  let keycode: u32 = matches
-    .value_of(name)
-    .and_then(|x| x.parse::<u32>().ok())
-    .expect(&*format!("Invalid {name}", name=name));
-
-  return keycode;
+    return key;
 }
 
 fn main() {
-  env_logger::init();
+    env_logger::init();
 
-  let matches = App::new("unmoved-mover")
-    .version(crate_version!())
-    .about("TODO")
-    .arg(
-      Arg::with_name("up-keycode")
-        .long("up-keycode")
-        .default_value("31")
-        .takes_value(true)
-        .required(true),
-    )
-    .arg(
-      Arg::with_name("down-keycode")
-        .long("down-keycode")
-        .default_value("44")
-        .takes_value(true)
-        .required(true),
-    )
-    .arg(
-      Arg::with_name("left-keycode")
-        .long("left-keycode")
-        .default_value("45")
-        .takes_value(true)
-        .required(true),
-    )
-    .arg(
-      Arg::with_name("right-keycode")
-        .long("right-keycode")
-        .default_value("46")
-        .takes_value(true)
-        .required(true),
-    )
-    .arg(
-      Arg::with_name("left-click-keycode")
-        .long("left-click-keycode")
-        .default_value("47")
-        .takes_value(true)
-        .required(true),
-    )
-    .arg(
-      Arg::with_name("right-click-keycode")
-        .long("right-click-keycode")
-        .default_value("48")
-        .takes_value(true)
-        .required(true),
-    )
-    .get_matches();
+    let matches = App::new("unmoved-mover")
+        .version(crate_version!())
+        .about("TODO")
+        .arg(
+            Arg::with_name("mod-key")
+                .long("mod-key")
+                .default_value("Mod1") // code: 64
+                .takes_value(true)
+                .required(true),
+        )
+        .arg(
+            Arg::with_name("up-key")
+                .long("up-key")
+                .default_value("i") // code: 31
+                .takes_value(true)
+                .required(true),
+        )
+        .arg(
+            Arg::with_name("down-key")
+                .long("down-key")
+                .default_value("k") // code: 44
+                .takes_value(true)
+                .required(true),
+        )
+        .arg(
+            Arg::with_name("left-key")
+                .long("left-key")
+                .default_value("j") // code: 45
+                .takes_value(true)
+                .required(true),
+        )
+        .arg(
+            Arg::with_name("right-key")
+                .long("right-key")
+                .default_value("l") // code: 46
+                .takes_value(true)
+                .required(true),
+        )
+        .arg(
+            Arg::with_name("left-click-key")
+                .long("left-click-key")
+                .default_value("semicolon") // code 47
+                .takes_value(true)
+                .required(true),
+        )
+        .arg(
+            Arg::with_name("right-click-key")
+                .long("right-click-key")
+                .default_value("apostrophe") // code: 48
+                .takes_value(true)
+                .required(true),
+        )
+        .arg(
+            Arg::with_name("tick-interval-ms")
+                .long("tick-interval-ms")
+                .default_value("10")
+                .takes_value(true)
+                .required(true),
+        )
+        .arg(
+            Arg::with_name("velocity-px-per-s")
+                .long("velocity-px-per-s")
+                .default_value("500")
+                .takes_value(true)
+                .required(true),
+        )
+        .get_matches();
 
-  let left_keycode = get_arg_keycode(&matches, "left-keycode");
-  let right_keycode = get_arg_keycode(&matches, "right-keycode");
-  let up_keycode = get_arg_keycode(&matches, "up-keycode");
-  let down_keycode = get_arg_keycode(&matches, "down-keycode");
-  let left_click_keycode = get_arg_keycode(&matches, "left-click-keycode");
-  let right_click_keycode = get_arg_keycode(&matches, "right-click-keycode");
+    let mod_key = get_arg_key(&matches, "mod-key");
+    let left_key = get_arg_key(&matches, "left-key");
+    let right_key = get_arg_key(&matches, "right-key");
+    let up_key = get_arg_key(&matches, "up-key");
+    let down_key = get_arg_key(&matches, "down-key");
+    let left_click_key = get_arg_key(&matches, "left-click-key");
+    let right_click_key = get_arg_key(&matches, "right-click-key");
 
-  let config = daemon::Config {
-    left_keycode: left_keycode,
-    right_keycode: right_keycode,
-    up_keycode: up_keycode,
-    down_keycode: down_keycode,
+    let tick_interval = matches
+      .value_of("tick-interval-ms")
+      .and_then(|x| x.parse::<u64>().ok())
+      .map(|x| Duration::from_millis(x))
+      .expect("Invalid tick-interval-ms");
 
-    left_click_keycode: left_click_keycode,
-    right_click_keycode: right_click_keycode,
-  };
-  daemon::run(&config).expect("Unable to start daemon");
+    let velocity_px_per_s = matches
+      .value_of("velocity-px-per-s")
+      .and_then(|x| x.parse::<u32>().ok())
+      .expect("Invalid velocity-px-per-s");
+
+    let config = daemon::Config {
+        mod_key,
+        left_key,
+        right_key,
+        up_key,
+        down_key,
+
+        left_click_key,
+        right_click_key,
+
+        tick_interval: tick_interval,
+        velocity_px_per_s: velocity_px_per_s,
+    };
+    daemon::run(&config).expect("Unable to start daemon");
 }
