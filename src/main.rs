@@ -2,6 +2,8 @@
 extern crate log;
 
 use clap::{crate_version, App, Arg, ArgMatches};
+use unmoved_mover::daemon;
+
 
 fn get_arg_keycode(matches: &ArgMatches, name: &str) -> u32 {
   let keycode: u32 = matches
@@ -68,4 +70,15 @@ fn main() {
   let down_keycode = get_arg_keycode(&matches, "down-keycode");
   let left_click_keycode = get_arg_keycode(&matches, "left-click-keycode");
   let right_click_keycode = get_arg_keycode(&matches, "right-click-keycode");
+
+  let config = daemon::Config {
+    left_keycode: left_keycode,
+    right_keycode: right_keycode,
+    up_keycode: up_keycode,
+    down_keycode: down_keycode,
+
+    left_click_keycode: left_click_keycode,
+    right_click_keycode: right_click_keycode,
+  };
+  daemon::run(&config).expect("Unable to start daemon");
 }
