@@ -161,7 +161,10 @@ fn handle_bound_key(conn: &mut Connection, state: &mut State, key: &Key, key_dow
       }
       state.down_keys.insert(key.clone());
     } else {
-      state.down_keys.remove(&key);
+      // Sway does not send release events when switching between bindings (only down)
+      // We clear the entire state here to prevent stuck movement events
+      // state.down_keys.remove(&key);
+      state.down_keys.clear();
     }
 
     handle_mouse_key(conn, &key, key_down)?;
