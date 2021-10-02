@@ -291,7 +291,7 @@ fn run_loop(config: &Config, daemon_state: &Arc<Mutex<State>>) -> Result<(), Box
     // Sleep
     let loop_end_time = std::time::Instant::now();
     let loop_elapsed = loop_end_time - loop_start_time;
-    let sleep_for = (tick_interval - loop_elapsed).max(Duration::ZERO);
+    let sleep_for = tick_interval.saturating_sub(loop_elapsed);
     thread::sleep(sleep_for);
   }
 }
