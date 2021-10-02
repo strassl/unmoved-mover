@@ -184,7 +184,7 @@ fn handle_binding_event(conn: &mut Connection, state: &mut State, config: &Confi
 
       if our_action {
         let key_down = binding.command.ends_with("press");
-        handle_bound_key(conn, state, &key, key_down);
+        handle_bound_key(conn, state, &key, key_down)?;
       } else {
         log::warn!("Event was not bound correctly - bound to \"{}\"", binding.command);
       }
