@@ -10,3 +10,7 @@ log = "0.4.8"
 env_logger = "0.7.1"
 clap = "2.33.0"
 swayipc = "3.0.0-alpha.3"
+
+[[bin]]
+name = "um"
+path = "src/main.rs"

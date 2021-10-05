@@ -1,63 +1,64 @@
-use swayipc::{BindingEvent, Connection, Event, EventType};
-use std::sync::{Arc, Mutex};
-use std::collections::{HashSet, HashMap};
-use std::thread;
-use std::boxed::Box;
-use std::error::Error;
-use std::time::Duration;
 use log;
+use std::boxed::Box;
+use std::collections::{HashMap, HashSet};
+use std::error::Error;
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
+use swayipc::{BindingEvent, Connection, Event, EventType};
 
 const SWAY_COMMAND_PRESS: &str = "nop press";
 const SWAY_COMMAND_RELEASE: &str = "nop release";
 
 type Keyname = String;
 
-#[derive (Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
-  pub mod_key: Keyname,
-  pub left_key: Keyname,
-  pub right_key: Keyname,
-  pub up_key: Keyname,
-  pub down_key: Keyname,
-  pub left_click_key: Keyname,
-  pub right_click_key: Keyname,
-
-  pub tick_interval: Duration,
-  pub velocity_px_per_s: u32,
+    pub required_mode: String,
+    pub key_combo_enter_mode: Keyname,
+    pub key_combo_exit_mode: Keyname,
+    pub mod_key: Keyname,
+    pub left_key: Keyname,
+    pub right_key: Keyname,
+    pub up_key: Keyname,
+    pub down_key: Keyname,
+    pub left_click_key: Keyname,
+    pub right_click_key: Keyname,
+    pub tick_interval: Duration,
+    pub cursor_velocity: u32,
+    pub skip_configuration: bool,
 }
 
-#[derive (Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Key {
-  Mod,
-
-  Up,
-  Down,
-  Left,
-  Right,
-
-  LeftClick,
-  RightClick,
+    Mod,
+    Up,
+    Down,
+    Left,
+    Right,
+    LeftClick,
+    RightClick,
 }
 
-#[derive (Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum KeyState {
-  Up,
-  Down,
+    Up,
+    Down,
 }
 
-#[derive (Default, Debug, Clone, PartialEq, Eq)]
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
 struct State {
-  down_keys: HashSet<Key>
+    down_keys: HashSet<Key>,
 }
 
 impl State {
-  fn get_key_state(&self, key: &Key) -> KeyState {
-    return if self.down_keys.contains(&key) {
-      KeyState::Down
-    } else {
-      KeyState::Up
+    fn get_key_state(&self, key: &Key) -> KeyState {
+        return if self.down_keys.contains(&key) {
+            KeyState::Down
+        } else {
+            KeyState::Up
+        };
     }
-  }
 }
 
 macro_rules! map_of {
@@ -74,97 +75,159 @@ macro_rules! collection_of {
   }};
 }
 
-fn run_sway_command<T: AsRef<str> + std::fmt::Display>(conn: &mut Connection, command: T) -> Result<(), Box<dyn Error>> {
-  log::trace!("Running command: {}", command);
-  conn.run_command(&command)?;
-  Ok(())
+fn run_sway_command<T: AsRef<str> + std::fmt::Display>(
+    conn: &mut Connection,
+    command: T,
+) -> Result<(), Box<dyn Error>> {
+    log::trace!("Running command: {}", command);
+    conn.run_command(&command)?;
+    Ok(())
 }
 
 fn setup_sway_config(config: &Config) -> Result<(), Box<dyn Error>> {
-  let mut conn = Connection::new()?;
+    if config.skip_configuration {
+        // if the user doesn't want to have unmoved-mover register its own keybidings
+        // then so be it
+        return Ok(());
+    }
 
-  let codes: HashSet<&str> = collection_of! {
-    &*config.up_key,
-    &*config.down_key,
-    &*config.left_key,
-    &*config.right_key,
-    &*config.left_click_key,
-    &*config.right_click_key,
-  };
-  
-  for &key in &codes {
-    log::debug!("Setting up: {}+{}", config.mod_key, key);
-    let unbind_press = format!("unbindsym {}+{}", config.mod_key, key);
-    let unbind_release = format!("unbindsym --release {}+{}", config.mod_key, key);
-    let bind_press = format!("bindsym --no-repeat {}+{} {}", config.mod_key, key, SWAY_COMMAND_PRESS);
-    let bind_release = format!("bindsym --release {}+{} {}", config.mod_key, key, SWAY_COMMAND_RELEASE);
+    let mut conn = Connection::new()?;
 
-    run_sway_command(&mut conn, unbind_press)?;
-    run_sway_command(&mut conn, unbind_release)?;
-    run_sway_command(&mut conn, bind_press)?;
-    run_sway_command(&mut conn, bind_release)?;
-  }
+    let codes: HashSet<&str> = collection_of! {
+      &*config.up_key,
+      &*config.down_key,
+      &*config.left_key,
+      &*config.right_key,
+      &*config.left_click_key,
+      &*config.right_click_key,
+    };
 
-  Ok(())
+    let mode_prefix = if config.required_mode.is_empty() {
+        "".to_string()
+    } else {
+        log::debug!(
+            "Setting up key combos to enter/exit mode: \"{}\" and \"{}\"",
+            config.key_combo_enter_mode,
+            config.key_combo_exit_mode
+        );
+        let unbind_enter_mode_command = format!("unbindsym {}", config.key_combo_enter_mode);
+        let enter_mode_command = format!(
+            "bindsym {} mode \"{}\"",
+            config.key_combo_enter_mode, config.required_mode
+        );
+        let unbind_exit_mode_command = format!(
+            "mode \"{}\" unbindsym {}",
+            config.required_mode, config.key_combo_exit_mode
+        );
+        let exit_mode_command = format!(
+            "mode \"{}\" bindsym {} mode default",
+            config.required_mode, config.key_combo_exit_mode
+        );
+        run_sway_command(&mut conn, unbind_enter_mode_command)?;
+        run_sway_command(&mut conn, enter_mode_command)?;
+        run_sway_command(&mut conn, unbind_exit_mode_command)?;
+        run_sway_command(&mut conn, exit_mode_command)?;
+
+        format!("mode \"{}\" ", config.required_mode)
+    };
+
+    for &key in &codes {
+        let key_combo = if config.mod_key.is_empty() {
+            format!("{}", key)
+        } else {
+            format!("{}+{}", config.mod_key, key)
+        };
+
+        // TODO remember the old bindings and restore them after the program exits
+        log::debug!("Setting up: {}", key_combo);
+        let unbind_press = format!("{}unbindsym {}", mode_prefix, key_combo);
+        let unbind_release = format!("{}unbindsym --release {}", mode_prefix, key_combo);
+        let bind_press = format!(
+            "{}bindsym --no-repeat {} {}",
+            mode_prefix, key_combo, SWAY_COMMAND_PRESS
+        );
+        let bind_release = format!(
+            "{}bindsym --release {} {}",
+            mode_prefix, key_combo, SWAY_COMMAND_RELEASE
+        );
+        run_sway_command(&mut conn, unbind_press)?;
+        run_sway_command(&mut conn, unbind_release)?;
+        run_sway_command(&mut conn, bind_press)?;
+        run_sway_command(&mut conn, bind_release)?;
+    }
+
+    Ok(())
 }
 
 fn parse_binding_key(config: &Config, symbol: &str) -> Option<Key> {
-  let symbol_to_key: HashMap<&str, Key> = map_of! {
-    &*config.up_key => Key::Up,
-    &*config.down_key => Key::Down,
-    &*config.left_key => Key::Left,
-    &*config.right_key => Key::Right,
-    &*config.left_click_key => Key::LeftClick,
-    &*config.right_click_key => Key::RightClick,
-  };
+    let symbol_to_key: HashMap<&str, Key> = map_of! {
+      &*config.up_key => Key::Up,
+      &*config.down_key => Key::Down,
+      &*config.left_key => Key::Left,
+      &*config.right_key => Key::Right,
+      &*config.left_click_key => Key::LeftClick,
+      &*config.right_click_key => Key::RightClick,
+    };
 
-  return symbol_to_key.get(symbol).map(|x| x.clone());
+    return symbol_to_key.get(symbol).map(|x| x.clone());
 }
 
 fn get_opposing_key(key: &Key) -> Option<Key> {
-  return match key {
-    Key::Up => Some(Key::Down),
-    Key::Down => Some(Key::Up),
-    Key::Right => Some(Key::Left),
-    Key::Left => Some(Key::Right),
-    _ => None,
-  }
+    return match key {
+        Key::Up => Some(Key::Down),
+        Key::Down => Some(Key::Up),
+        Key::Right => Some(Key::Left),
+        Key::Left => Some(Key::Right),
+        _ => None,
+    };
 }
 
-fn handle_mouse_key(conn: &mut Connection, key: &Key, key_down: bool) -> Result<(), Box<dyn Error>> {
-  let button = match key {
-    Key::LeftClick => Some("button1"),
-    Key::RightClick => Some("button3"),
-    _ => None,
-  };
+fn handle_mouse_key(
+    conn: &mut Connection,
+    key: &Key,
+    key_down: bool,
+) -> Result<(), Box<dyn Error>> {
+    let button = match key {
+        Key::LeftClick => Some("button1"),
+        Key::RightClick => Some("button3"),
+        _ => None,
+    };
 
-  let action = if key_down {"press"} else {"release"};
+    let action = if key_down { "press" } else { "release" };
 
-  match button {
-    Some(button) => {
-      let cmd = format!("seat - cursor {} {}", action, button);
-      run_sway_command(conn, &cmd)?;
-    },
-    None => {},
-  }
+    match button {
+        Some(button) => {
+            let cmd = format!("seat - cursor {} {}", action, button);
+            run_sway_command(conn, &cmd)?;
+        }
+        None => {}
+    }
 
-  Ok(())
+    Ok(())
 }
 
-fn handle_bound_key(conn: &mut Connection, state: &mut State, key: &Key, key_down: bool) -> Result<(), Box<dyn Error>> {
+fn handle_bound_key(
+    conn: &mut Connection,
+    state: &mut State,
+    key: &Key,
+    key_down: bool,
+) -> Result<(), Box<dyn Error>> {
     if key_down {
-      match get_opposing_key(&key) {
-        Some(key) => {
-          state.down_keys.remove(&key);
-        },
-        _ => {},
-      }
-      state.down_keys.insert(key.clone());
+        match get_opposing_key(&key) {
+            Some(key) => {
+                log::trace!("Removing opposing down key");
+                state.down_keys.remove(&key);
+            }
+            _ => {}
+        }
+        log::trace!("Adding down key");
+        state.down_keys.insert(key.clone());
     } else {
-      // Sway does not send release events when switching between bindings (only down)
-      // We clear the entire state here to prevent stuck movement events
-      // state.down_keys.remove(&key);
-      state.down_keys.clear();
+        // Sway does not send release events when switching between bindings (only down)
+        // We clear the entire state here to prevent stuck movement events
+        // state.down_keys.remove(&key);
+        log::trace!("Clearing down keys");
+        state.down_keys.clear();
     }
 
     handle_mouse_key(conn, &key, key_down)?;
@@ -172,147 +235,190 @@ fn handle_bound_key(conn: &mut Connection, state: &mut State, key: &Key, key_dow
     Ok(())
 }
 
-fn handle_binding_event(conn: &mut Connection, state: &mut State, config: &Config, event: &BindingEvent) -> Result<(), Box<dyn Error>> {
-  let binding = &event.binding;
-  let modifiers: HashSet<&String> = binding.event_state_mask.iter().collect();
-  let mod_down = modifiers == collection_of! { &config.mod_key };
+fn handle_binding_event(
+    conn: &mut Connection,
+    state: &mut State,
+    config: &Config,
+    event: &BindingEvent,
+) -> Result<(), Box<dyn Error>> {
+    let binding = &event.binding;
 
-  handle_bound_key(conn, state, &Key::Mod, mod_down)?;
-
-  let bound_key = binding.symbol.as_ref().and_then(|x| parse_binding_key(&config, &*x));
-  match bound_key {
-    Some(key) => {
-      let our_commands: HashSet<&str> = collection_of! { SWAY_COMMAND_PRESS, SWAY_COMMAND_RELEASE};
-      let our_action = our_commands.contains(&*binding.command);
-
-      if our_action {
-        let key_down = binding.command.ends_with("press");
-        handle_bound_key(conn, state, &key, key_down)?;
-      } else {
-        log::warn!("Event was not bound correctly - bound to \"{}\"", binding.command);
-      }
+    // if a modifier is configured, check its state
+    if !config.mod_key.is_empty() {
+        let modifiers: HashSet<&String> = binding.event_state_mask.iter().collect();
+        let mod_down = modifiers == collection_of! { &config.mod_key };
+        handle_bound_key(conn, state, &Key::Mod, mod_down)?;
     }
-    None => {
-        log::trace!("Ignoring unbound key event");
-    }
-  }
 
-  Ok(())
+    let bound_key = binding
+        .symbol
+        .as_ref()
+        .and_then(|x| parse_binding_key(&config, &*x));
+
+    match bound_key {
+        Some(key) => {
+            let our_commands: HashSet<&str> =
+                collection_of! { SWAY_COMMAND_PRESS, SWAY_COMMAND_RELEASE };
+            let our_action = our_commands.contains(&*binding.command);
+
+            if our_action {
+                let key_down = binding.command.ends_with("press");
+                handle_bound_key(conn, state, &key, key_down)?;
+            } else {
+                log::warn!(
+                    "Event was not bound correctly - bound to \"{}\"",
+                    binding.command
+                );
+            }
+        }
+        None => {
+            log::trace!("Ignoring unbound key event");
+        }
+    }
+
+    Ok(())
 }
 
-fn run_event_receiver(daemon_state: &Arc<Mutex<State>>, daemon_config: &Config) -> Result<(), Box<dyn Error>> {
-  let config = daemon_config.clone();
-  let mut conn = Connection::new()?;
-  let event_types = [EventType::Binding];
-  let event_iter = Connection::new()?.subscribe(&event_types)?;
+fn run_event_receiver(
+    daemon_state: &Arc<Mutex<State>>,
+    daemon_config: &Config,
+) -> Result<(), Box<dyn Error>> {
+    let config = daemon_config.clone();
+    let mut conn = Connection::new()?;
+    let event_types = [EventType::Binding];
+    let event_iter = Connection::new()?.subscribe(&event_types)?;
 
-  let thread_state = Arc::clone(daemon_state);
-  thread::spawn(move || {
-    for evt_result in event_iter {
-      let event = evt_result.expect("Failed to get event");
-      log::trace!("Received event: {:?}", event);
-      let mut state = thread_state.lock().expect("Failed to get state");
+    let thread_state = Arc::clone(daemon_state);
+    thread::spawn(move || {
+        for evt_result in event_iter {
+            let event = evt_result.expect("Failed to get event");
+            log::trace!("Received event: {:?}", event);
+            let mut state = thread_state.lock().expect("Failed to get state");
 
-      match event {
-        Event::Binding(event) => {
-          handle_binding_event(&mut conn, &mut state, &config, &event)
-        },
-        _ => Ok(())
-      }.expect("Failed to handle event")
-    }
-  });
+            match event {
+                Event::Binding(event) => {
+                    handle_binding_event(&mut conn, &mut state, &config, &event)
+                }
+                _ => Ok(()),
+            }
+            .expect("Failed to handle event")
+        }
+    });
 
-  Ok(())
+    Ok(())
 }
 
-fn handle_tick(config: &Config, conn: &mut Connection, current_state: &State, elapsed_time: &Duration) -> Result<(), Box<dyn Error>> {
-  log::trace!("Tick state: {:?}, elapsed_time: {:?}", current_state, elapsed_time);
+fn handle_tick(
+    config: &Config,
+    conn: &mut Connection,
+    current_state: &State,
+    elapsed_time: &Duration,
+) -> Result<(), Box<dyn Error>> {
+    log::trace!(
+        "Tick state: {:?}, elapsed_time: {:?}",
+        current_state,
+        elapsed_time
+    );
 
-  let velocity_px_per_s = config.velocity_px_per_s;
-  let elapsed_s = elapsed_time.as_secs_f32();
-  
-  let mod_state = current_state.get_key_state(&Key::Mod);
-  let up_state = current_state.get_key_state(&Key::Up);
-  let down_state = current_state.get_key_state(&Key::Down);
-  let left_state = current_state.get_key_state(&Key::Left);
-  let right_state = current_state.get_key_state(&Key::Right);
+    let cursor_velocity = config.cursor_velocity;
+    let elapsed_s = elapsed_time.as_secs_f32();
 
-  if mod_state != KeyState::Down {
-    // Nothing to do, mod is not pressed
-    log::trace!("Skipping tick because mod is not pressed");
-    return Ok(());
-  }
+    let mod_state = current_state.get_key_state(&Key::Mod);
+    let up_state = current_state.get_key_state(&Key::Up);
+    let down_state = current_state.get_key_state(&Key::Down);
+    let left_state = current_state.get_key_state(&Key::Left);
+    let right_state = current_state.get_key_state(&Key::Right);
 
-  let delta_px = elapsed_s * velocity_px_per_s as f32;
-  let mut move_vec_x: f32 = 0.0;
-  let mut move_vec_y: f32 = 0.0;
-  if up_state == KeyState::Down {
-    move_vec_y -= 1.0;
-  }
-  if down_state == KeyState::Down {
-    move_vec_y += 1.0;
-  }
-  if right_state == KeyState::Down {
-    move_vec_x += 1.0;
-  }
-  if left_state == KeyState::Down {
-    move_vec_x -= 1.0;
-  }
+    let mod_not_pressed = !config.mod_key.is_empty() && mod_state != KeyState::Down;
+    if mod_not_pressed {
+        // Nothing to do, configured mod is not pressed
+        log::trace!("Skipping tick: Configured modifier is not pressed");
+        return Ok(());
+    }
 
-  let move_vec_magnitude = (move_vec_x.powf(2.0) + move_vec_y.powf(2.0)).sqrt();
-  let move_dx = move_vec_x / move_vec_magnitude;
-  let move_dy = move_vec_y / move_vec_magnitude;
-  let dx_px = (move_dx * delta_px).round() as i32;
-  let dy_px = (move_dy * delta_px).round() as i32;
+    let not_in_mode = !config.required_mode.is_empty()
+        && match conn.get_binding_state() {
+            Ok(mode) => config.required_mode != mode,
+            Err(_) => false,
+        };
+    if not_in_mode {
+        // Nothing to do, wrong mode is active
+        log::trace!("Skipping tick: Not in configured mode");
+        return Ok(());
+    }
 
-  log::trace!("Moving mouse by x: {dx}px y: {dy}px", dx=dx_px, dy=dy_px);
-  let move_cmd = format!(
-    "seat - cursor move {dx} {dy}", dx=dx_px, dy=dy_px
-  );
-  run_sway_command(conn, move_cmd)?;
+    let delta_px = elapsed_s * cursor_velocity as f32;
+    let mut move_vec_x: f32 = 0.0;
+    let mut move_vec_y: f32 = 0.0;
+    if up_state == KeyState::Down {
+        move_vec_y -= 1.0;
+    }
+    if down_state == KeyState::Down {
+        move_vec_y += 1.0;
+    }
+    if right_state == KeyState::Down {
+        move_vec_x += 1.0;
+    }
+    if left_state == KeyState::Down {
+        move_vec_x -= 1.0;
+    }
 
-  Ok(())
+    let move_vec_magnitude = (move_vec_x.powf(2.0) + move_vec_y.powf(2.0)).sqrt();
+    let move_dx = move_vec_x / move_vec_magnitude;
+    let move_dy = move_vec_y / move_vec_magnitude;
+    let dx_px = (move_dx * delta_px).round() as i32;
+    let dy_px = (move_dy * delta_px).round() as i32;
+
+    log::trace!(
+        "Moving mouse by x: {dx}px y: {dy}px",
+        dx = dx_px,
+        dy = dy_px
+    );
+    let move_cmd = format!("seat - cursor move {dx} {dy}", dx = dx_px, dy = dy_px);
+    run_sway_command(conn, move_cmd)?;
+
+    Ok(())
 }
 
 fn run_loop(config: &Config, daemon_state: &Arc<Mutex<State>>) -> Result<(), Box<dyn Error>> {
-  let tick_interval = config.tick_interval;
+    let tick_interval = config.tick_interval;
 
-  let mut conn = Connection::new()?;
-  let mut last_iteration_time = std::time::Instant::now();
+    let mut conn = Connection::new()?;
+    let mut last_iteration_time = std::time::Instant::now();
 
-  loop {
-    let loop_start_time = std::time::Instant::now();
-    let elapsed_time = last_iteration_time.elapsed();
-    last_iteration_time = loop_start_time;
+    loop {
+        let loop_start_time = std::time::Instant::now();
+        let elapsed_time = last_iteration_time.elapsed();
+        last_iteration_time = loop_start_time;
 
-    // Move cursor (based on previous/current state and elapsed time)
-    {
-      let current_state = daemon_state.lock().expect("Failed to get state").clone();
-      handle_tick(&config, &mut conn, &current_state, &elapsed_time)?;
+        // Move cursor (based on previous/current state and elapsed time)
+        {
+            let current_state = daemon_state.lock().expect("Failed to get state").clone();
+            handle_tick(&config, &mut conn, &current_state, &elapsed_time)?;
+        }
+
+        // Sleep
+        let loop_end_time = std::time::Instant::now();
+        let loop_elapsed = loop_end_time - loop_start_time;
+        let sleep_for = tick_interval.saturating_sub(loop_elapsed);
+        thread::sleep(sleep_for);
     }
-
-    // Sleep
-    let loop_end_time = std::time::Instant::now();
-    let loop_elapsed = loop_end_time - loop_start_time;
-    let sleep_for = tick_interval.saturating_sub(loop_elapsed);
-    thread::sleep(sleep_for);
-  }
 }
 
 pub fn run(config: &Config) -> Result<(), Box<dyn Error>> {
-  // Setup sway config
-  log::info!("Setting up sway config");
-  setup_sway_config(&config)?;
+    // Setup sway config
+    log::info!("Setting up sway config");
+    setup_sway_config(&config)?;
 
-  let state = Arc::new(Mutex::new(State::default()));
+    let state = Arc::new(Mutex::new(State::default()));
 
-  // Spawn event receiver thread
-  log::info!("Spawning event receiver");
-  run_event_receiver(&state, &config)?;
+    // Spawn event receiver thread
+    log::info!("Spawning event receiver");
+    run_event_receiver(&state, &config)?;
 
-  // Run main loop
-  log::info!("Starting main loop");
-  run_loop(&config, &state)?;
+    // Run main loop
+    log::info!("Starting main loop");
+    run_loop(&config, &state)?;
 
-  Ok(())
+    Ok(())
 }
