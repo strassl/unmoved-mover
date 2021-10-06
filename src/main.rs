@@ -164,7 +164,7 @@ fn main() {
     let skip_configuration = matches.is_present("no-configuration-registration");
 
     let config = daemon::Config {
-        required_mode,
+        required_mode: if required_mode == "" { None } else { Some(required_mode)},
         key_combo_enter_mode,
         key_combo_exit_mode,
         mod_key,

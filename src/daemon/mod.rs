@@ -2,7 +2,7 @@ use log;
 use std::boxed::Box;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Condvar};
 use std::thread;
 use std::time::Duration;
 use swayipc::{BindingEvent, Connection, Event, EventType};
@@ -14,7 +14,7 @@ type Keyname = String;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
-    pub required_mode: String,
+    pub required_mode: Option<String>,
     pub key_combo_enter_mode: Keyname,
     pub key_combo_exit_mode: Keyname,
     pub mod_key: Keyname,
@@ -46,8 +46,14 @@ enum KeyState {
     Down,
 }
 
+struct SharedState {
+  state: Mutex<State>,
+  state_change_cvar: Condvar,
+}
+
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 struct State {
+    mode: String,
     down_keys: HashSet<Key>,
 }
 
@@ -102,9 +108,9 @@ fn setup_sway_config(config: &Config) -> Result<(), Box<dyn Error>> {
       &*config.right_click_key,
     };
 
-    let mode_prefix = if config.required_mode.is_empty() {
-        "".to_string()
-    } else {
+    let mode_prefix = match &config.required_mode {
+        None => "".to_string(),
+        Some(required_mode) => {
         log::debug!(
             "Setting up key combos to enter/exit mode: \"{}\" and \"{}\"",
             config.key_combo_enter_mode,
@@ -113,22 +119,23 @@ fn setup_sway_config(config: &Config) -> Result<(), Box<dyn Error>> {
         let unbind_enter_mode_command = format!("unbindsym {}", config.key_combo_enter_mode);
         let enter_mode_command = format!(
             "bindsym {} mode \"{}\"",
-            config.key_combo_enter_mode, config.required_mode
+            config.key_combo_enter_mode, required_mode
         );
         let unbind_exit_mode_command = format!(
             "mode \"{}\" unbindsym {}",
-            config.required_mode, config.key_combo_exit_mode
+            required_mode, config.key_combo_exit_mode
         );
         let exit_mode_command = format!(
             "mode \"{}\" bindsym {} mode default",
-            config.required_mode, config.key_combo_exit_mode
+            required_mode, config.key_combo_exit_mode
         );
         run_sway_command(&mut conn, unbind_enter_mode_command)?;
         run_sway_command(&mut conn, enter_mode_command)?;
         run_sway_command(&mut conn, unbind_exit_mode_command)?;
         run_sway_command(&mut conn, exit_mode_command)?;
 
-        format!("mode \"{}\" ", config.required_mode)
+        format!("mode \"{}\" ", required_mode)
+      }
     };
 
     for &key in &codes {
@@ -280,7 +287,7 @@ fn handle_binding_event(
 }
 
 fn run_event_receiver(
-    daemon_state: &Arc<Mutex<State>>,
+    daemon_state: &Arc<SharedState>,
     daemon_config: &Config,
 ) -> Result<(), Box<dyn Error>> {
     let config = daemon_config.clone();
@@ -293,27 +300,41 @@ fn run_event_receiver(
         for evt_result in event_iter {
             let event = evt_result.expect("Failed to get event");
             log::trace!("Received event: {:?}", event);
-            let mut state = thread_state.lock().expect("Failed to get state");
 
             match event {
                 Event::Binding(event) => {
-                    handle_binding_event(&mut conn, &mut state, &config, &event)
+                    let mut state = thread_state.state.lock().expect("Failed to get state");
+                    handle_binding_event(&mut conn, &mut state, &config, &event).expect("Failed to handle event");
+                    drop(state);
+                    thread_state.state_change_cvar.notify_all();
                 }
-                _ => Ok(()),
+                Event::Mode(event) => {
+                    let mut state = thread_state.state.lock().expect("Failed to get state");
+                    state.mode = event.change;
+                    drop(state);
+                    thread_state.state_change_cvar.notify_all();
+                }
+                _ => {}
             }
-            .expect("Failed to handle event")
+            
         }
     });
 
     Ok(())
 }
 
-fn handle_tick(
+enum TickAction {
+  MoveCursor {
+    dx_px: i32,
+    dy_px: i32,
+  },
+}
+
+fn get_action(
     config: &Config,
-    conn: &mut Connection,
     current_state: &State,
     elapsed_time: &Duration,
-) -> Result<(), Box<dyn Error>> {
+) -> Option<TickAction> {
     log::trace!(
         "Tick state: {:?}, elapsed_time: {:?}",
         current_state,
@@ -333,18 +354,18 @@ fn handle_tick(
     if mod_not_pressed {
         // Nothing to do, configured mod is not pressed
         log::trace!("Skipping tick: Configured modifier is not pressed");
-        return Ok(());
+        return None;
     }
 
-    let not_in_mode = !config.required_mode.is_empty()
-        && match conn.get_binding_state() {
-            Ok(mode) => config.required_mode != mode,
-            Err(_) => false,
-        };
+    let not_in_mode = match &config.required_mode {
+      Some(required_mode) => *required_mode == current_state.mode,
+      None => true,
+    };
+
     if not_in_mode {
         // Nothing to do, wrong mode is active
         log::trace!("Skipping tick: Not in configured mode");
-        return Ok(());
+        return None;
     }
 
     let delta_px = elapsed_s * cursor_velocity as f32;
@@ -369,39 +390,57 @@ fn handle_tick(
     let dx_px = (move_dx * delta_px).round() as i32;
     let dy_px = (move_dy * delta_px).round() as i32;
 
-    log::trace!(
-        "Moving mouse by x: {dx}px y: {dy}px",
-        dx = dx_px,
-        dy = dy_px
-    );
-    let move_cmd = format!("seat - cursor move {dx} {dy}", dx = dx_px, dy = dy_px);
-    run_sway_command(conn, move_cmd)?;
-
-    Ok(())
+    return Some(TickAction::MoveCursor {
+      dx_px,
+      dy_px,
+    });
 }
 
-fn run_loop(config: &Config, daemon_state: &Arc<Mutex<State>>) -> Result<(), Box<dyn Error>> {
+fn run_loop(config: &Config, daemon_state: &Arc<SharedState>) -> Result<(), Box<dyn Error>> {
     let tick_interval = config.tick_interval;
 
     let mut conn = Connection::new()?;
-    let mut last_iteration_time = std::time::Instant::now();
+    let mut last_active_iteration_time: Option<std::time::Instant> = None;
 
     loop {
+        let current_state = daemon_state.state_change_cvar.wait_while(daemon_state.state.lock().expect("Failed to unlock state mutex"), |state| {
+          let elapsed_time = last_active_iteration_time.map_or(Duration::ZERO, |t| t.elapsed());
+          let tick_action = get_action(&config, &state, &elapsed_time);
+          let is_idle = match tick_action {
+            Some(_) => false,
+            None => true,
+          };
+
+          is_idle
+        }).expect("Failed to unlock state mutex").clone();
+
         let loop_start_time = std::time::Instant::now();
-        let elapsed_time = last_iteration_time.elapsed();
-        last_iteration_time = loop_start_time;
 
-        // Move cursor (based on previous/current state and elapsed time)
-        {
-            let current_state = daemon_state.lock().expect("Failed to get state").clone();
-            handle_tick(&config, &mut conn, &current_state, &elapsed_time)?;
-        }
+        let elapsed_time = last_active_iteration_time.map_or(Duration::ZERO, |t| t.elapsed());
+        let tick_action = get_action(&config, &current_state, &elapsed_time);
+        let new_last_active_iteration_time = match tick_action {
+          Some(TickAction::MoveCursor { dx_px, dy_px}) => {
+              log::trace!(
+                  "Moving mouse by x: {dx}px y: {dy}px",
+                  dx = dx_px,
+                  dy = dy_px
+              );
 
-        // Sleep
-        let loop_end_time = std::time::Instant::now();
-        let loop_elapsed = loop_end_time - loop_start_time;
-        let sleep_for = tick_interval.saturating_sub(loop_elapsed);
-        thread::sleep(sleep_for);
+              let move_cmd = format!("seat - cursor move {dx} {dy}", dx = dx_px, dy = dy_px);
+              run_sway_command(&mut conn, move_cmd)?;
+
+              Some(loop_start_time)
+          },
+          None => None
+      };
+      last_active_iteration_time = new_last_active_iteration_time;
+
+      // Sleep
+      let loop_end_time = std::time::Instant::now();
+      let loop_elapsed = loop_end_time - loop_start_time;
+      let sleep_for = tick_interval.saturating_sub(loop_elapsed);
+
+      thread::sleep(sleep_for);
     }
 }
 
@@ -410,7 +449,10 @@ pub fn run(config: &Config) -> Result<(), Box<dyn Error>> {
     log::info!("Setting up sway config");
     setup_sway_config(&config)?;
 
-    let state = Arc::new(Mutex::new(State::default()));
+    let state = Arc::new(SharedState {
+      state: Mutex::new(State::default()),
+      state_change_cvar: Condvar::new(),
+    });
 
     // Spawn event receiver thread
     log::info!("Spawning event receiver");
